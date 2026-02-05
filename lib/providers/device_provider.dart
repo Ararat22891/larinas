@@ -13,6 +13,7 @@ class DeviceProvider with ChangeNotifier {
   SystemStats? _systemStats;
   bool _isLoading = false;
   String? _error;
+  Duration? _lastConnectDuration;
 
   List<LinuxDevice> get devices => _devices;
   LinuxDevice? get selectedDevice => _selectedDevice;
@@ -20,6 +21,7 @@ class DeviceProvider with ChangeNotifier {
   bool get isLoading => _isLoading;
   String? get error => _error;
   bool get isConnected => _sshService.isConnected;
+  Duration? get lastConnectDuration => _lastConnectDuration;
   void selectDevice(LinuxDevice? device) {
     _selectedDevice = device;
     notifyListeners();
@@ -81,29 +83,19 @@ class DeviceProvider with ChangeNotifier {
   Future<bool> connectToDevice(LinuxDevice device) async {
     _isLoading = true;
     _error = null;
+    _lastConnectDuration = null;
     notifyListeners();
 
     try {
-      bool connected = false;
-      for (var attempt = 1; attempt <= 1; attempt++) {
-        try {
-          connected = await _sshService.connect(device).timeout(
-            const Duration(seconds: 8),
-            onTimeout: () {
-              throw Exception('Таймаут подключения. Проверьте доступность устройства.');
-            },
-          );
-          if (connected) {
-            break;
-          }
-        } catch (e) {
-          if (attempt < 2) {
-            await Future.delayed(const Duration(milliseconds: 700));
-            continue;
-          }
-          rethrow;
-        }
-      }
+      final stopwatch = Stopwatch()..start();
+      final connected = await _sshService.connect(device).timeout(
+        const Duration(seconds: 8),
+        onTimeout: () {
+          throw Exception('Таймаут подключения. Проверьте доступность устройства.');
+        },
+      );
+      stopwatch.stop();
+      _lastConnectDuration = stopwatch.elapsed;
       
       if (connected) {
         if (_selectedDevice != null && _selectedDevice!.id != device.id) {
@@ -127,6 +119,15 @@ class DeviceProvider with ChangeNotifier {
         return false;
       }
     } catch (e) {
+      if (_selectedDevice != null &&
+          _selectedDevice!.id == device.id &&
+          _sshService.isConnected) {
+        _error = null;
+        _isLoading = false;
+        notifyListeners();
+        return true;
+      }
+      _lastConnectDuration = null;
       String errorMessage = 'Ошибка подключения: ';
       if (e.toString().contains('timeout') || e.toString().contains('Таймаут')) {
         errorMessage = 'Таймаут подключения. Устройство недоступно или неверный адрес.';

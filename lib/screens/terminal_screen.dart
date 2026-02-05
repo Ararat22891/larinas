@@ -22,6 +22,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
   bool _isRunning = false;
   String _currentDir = '~';
   String _prompt = '';
+  bool _isCompleting = false;
+  List<String> _suggestions = [];
 
   @override
   void dispose() {
@@ -97,6 +99,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
       setState(() {
         _isRunning = false;
         _controller.clear();
+        _suggestions = [];
       });
       _scrollToBottom();
       _inputFocus.requestFocus();
@@ -170,6 +173,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                   shortcuts: {
                     LogicalKeySet(LogicalKeyboardKey.arrowUp): const _HistoryUpIntent(),
                     LogicalKeySet(LogicalKeyboardKey.arrowDown): const _HistoryDownIntent(),
+                    LogicalKeySet(LogicalKeyboardKey.tab): const _TabCompleteIntent(),
                   },
                   child: Actions(
                     actions: {
@@ -182,6 +186,12 @@ class _TerminalScreenState extends State<TerminalScreen> {
                       _HistoryDownIntent: CallbackAction<_HistoryDownIntent>(
                         onInvoke: (_) {
                           _historyDown();
+                          return null;
+                        },
+                      ),
+                      _TabCompleteIntent: CallbackAction<_TabCompleteIntent>(
+                        onInvoke: (_) {
+                          _handleTabCompletion();
                           return null;
                         },
                       ),
@@ -217,6 +227,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
                           if (_historyIndex == -1) {
                             _draftCommand = value;
                           }
+                          if (_suggestions.isNotEmpty) {
+                            setState(() => _suggestions = []);
+                          }
                         },
                         onSubmitted: (_) => _runCommand(),
                       ),
@@ -227,6 +240,40 @@ class _TerminalScreenState extends State<TerminalScreen> {
             ],
           ),
         ),
+        if (_suggestions.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0B0F14),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFF1F2937)),
+              ),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: _suggestions
+                      .map(
+                        (item) => Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: ActionChip(
+                            label: Text(
+                              item,
+                              style: const TextStyle(
+                                fontFamily: 'monospace',
+                                color: Color(0xFFE5E7EB),
+                              ),
+                            ),
+                            onPressed: () => _insertSuggestion(item),
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -258,6 +305,142 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _controller.selection = TextSelection.fromPosition(
       TextPosition(offset: _controller.text.length),
     );
+  }
+
+  Future<void> _handleTabCompletion() async {
+    if (_isRunning || _isCompleting) return;
+    final text = _controller.text;
+    final selection = _controller.selection;
+    if (selection.baseOffset < 0) return;
+    final cursor = selection.baseOffset;
+    final before = text.substring(0, cursor);
+    final after = text.substring(cursor);
+
+    final match = RegExp(r'([^\s]*)$').firstMatch(before);
+    if (match == null) return;
+    final token = match.group(1) ?? '';
+
+    String baseDir = '';
+    String prefix = token;
+    if (token.contains('/')) {
+      final idx = token.lastIndexOf('/');
+      baseDir = token.substring(0, idx + 1);
+      prefix = token.substring(idx + 1);
+    }
+
+    if (baseDir.contains(' ') || prefix.contains(' ')) return;
+
+    _isCompleting = true;
+    try {
+      final ssh = context.read<DeviceProvider>().sshService;
+      List<String> candidates = [];
+      if (token.isEmpty) {
+        final output = await ssh.executeCommand(
+          "cd '$_currentDir' && ls -1a 2>/dev/null",
+        );
+        candidates = _splitCandidates(output);
+      } else if (token.contains('/')) {
+        final output = await ssh.executeCommand(
+          "cd '$_currentDir' && ls -1a ${baseDir}${prefix}* 2>/dev/null",
+        );
+        candidates = _splitCandidates(output);
+      } else {
+        final escaped = prefix.replaceAll("'", "'\"'\"'");
+        final output = await ssh.executeCommand(
+          "bash -lc \"compgen -c -- '$escaped' | sort -u\" 2>/dev/null",
+        );
+        candidates = _splitCandidates(output);
+        if (candidates.isEmpty) {
+          final files = await ssh.executeCommand(
+            "cd '$_currentDir' && ls -1a ${baseDir}${prefix}* 2>/dev/null",
+          );
+          candidates = _splitCandidates(files);
+        }
+      }
+      if (candidates.length > 200) {
+        candidates = candidates.take(200).toList();
+      }
+      if (candidates.isEmpty) return;
+
+      if (candidates.length == 1) {
+        final completed = '${baseDir}${candidates.first}';
+        final newText = before.replaceRange(
+          before.length - token.length,
+          before.length,
+          completed,
+        );
+        _controller.text = '$newText$after';
+        _controller.selection = TextSelection.fromPosition(
+          TextPosition(offset: newText.length),
+        );
+        setState(() => _suggestions = []);
+        return;
+      }
+
+      final common = _commonPrefix(candidates);
+      if (common.length > prefix.length) {
+        final completed = '${baseDir}${common}';
+        final newText = before.replaceRange(
+          before.length - token.length,
+          before.length,
+          completed,
+        );
+        _controller.text = '$newText$after';
+        _controller.selection = TextSelection.fromPosition(
+          TextPosition(offset: newText.length),
+        );
+        setState(() => _suggestions = candidates);
+        return;
+      }
+
+      setState(() => _suggestions = candidates);
+    } catch (_) {
+    } finally {
+      _isCompleting = false;
+    }
+  }
+
+  List<String> _splitCandidates(String output) {
+    return output
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+  }
+
+  void _insertSuggestion(String value) {
+    final text = _controller.text;
+    final selection = _controller.selection;
+    if (selection.baseOffset < 0) return;
+    final cursor = selection.baseOffset;
+    final before = text.substring(0, cursor);
+    final after = text.substring(cursor);
+    final match = RegExp(r'([^\s]*)$').firstMatch(before);
+    if (match == null) return;
+    final token = match.group(1) ?? '';
+    final newText = before.replaceRange(
+      before.length - token.length,
+      before.length,
+      value,
+    );
+    _controller.text = '$newText$after';
+    _controller.selection = TextSelection.fromPosition(
+      TextPosition(offset: newText.length),
+    );
+    setState(() => _suggestions = []);
+    _inputFocus.requestFocus();
+  }
+
+  String _commonPrefix(List<String> items) {
+    if (items.isEmpty) return '';
+    var prefix = items.first;
+    for (final item in items.skip(1)) {
+      while (!item.startsWith(prefix)) {
+        if (prefix.isEmpty) return '';
+        prefix = prefix.substring(0, prefix.length - 1);
+      }
+    }
+    return prefix;
   }
 }
 
@@ -293,6 +476,10 @@ class _HistoryUpIntent extends Intent {
 
 class _HistoryDownIntent extends Intent {
   const _HistoryDownIntent();
+}
+
+class _TabCompleteIntent extends Intent {
+  const _TabCompleteIntent();
 }
 
 class _TerminalPromptLine extends StatelessWidget {

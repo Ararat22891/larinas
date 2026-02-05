@@ -41,6 +41,23 @@ class _ServerWorkspaceScreenState extends State<ServerWorkspaceScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final isNarrow = MediaQuery.of(context).size.width < 900;
+
+    if (isNarrow) {
+      return Scaffold(
+        appBar: AppBar(
+          title: Text(_selectedDevice?.name ?? 'Серверы'),
+        ),
+        drawer: Drawer(
+          child: SafeArea(
+            child: _buildSidebar(context, isDrawer: true),
+          ),
+        ),
+        backgroundColor: theme.scaffoldBackgroundColor,
+        body: _buildWorkspace(context, isDrawer: true),
+      );
+    }
+
     return Scaffold(
       backgroundColor: theme.scaffoldBackgroundColor,
       body: SafeArea(
@@ -56,10 +73,10 @@ class _ServerWorkspaceScreenState extends State<ServerWorkspaceScreen> {
     );
   }
 
-  Widget _buildSidebar(BuildContext context) {
+  Widget _buildSidebar(BuildContext context, {bool isDrawer = false}) {
     final theme = Theme.of(context);
     return Container(
-      width: 320,
+      width: isDrawer ? double.infinity : 320,
       decoration: BoxDecoration(
         color: theme.colorScheme.surface,
         border: Border(
@@ -130,7 +147,13 @@ class _ServerWorkspaceScreenState extends State<ServerWorkspaceScreen> {
                   itemBuilder: (context, index) {
                     final groupName = groupNames[index];
                     final devices = groups[groupName] ?? [];
-                    return _buildGroupSection(context, provider, groupName, devices);
+                    return _buildGroupSection(
+                      context,
+                      provider,
+                      groupName,
+                      devices,
+                      isDrawer: isDrawer,
+                    );
                   },
                 );
               },
@@ -172,6 +195,7 @@ class _ServerWorkspaceScreenState extends State<ServerWorkspaceScreen> {
     DeviceProvider provider,
     String groupName,
     List<LinuxDevice> devices,
+    {bool isDrawer = false}
   ) {
     final theme = Theme.of(context);
     return Padding(
@@ -198,7 +222,13 @@ class _ServerWorkspaceScreenState extends State<ServerWorkspaceScreen> {
               ],
             ),
           ),
-          for (final device in devices) _buildDeviceRow(context, provider, device),
+          for (final device in devices)
+            _buildDeviceRow(
+              context,
+              provider,
+              device,
+              closeDrawer: isDrawer,
+            ),
         ],
       ),
     );
@@ -208,13 +238,28 @@ class _ServerWorkspaceScreenState extends State<ServerWorkspaceScreen> {
     BuildContext context,
     DeviceProvider provider,
     LinuxDevice device,
+    {bool closeDrawer = false}
   ) {
     final theme = Theme.of(context);
     final status = _computeStatusFor(provider, device);
     final isSelected = _selectedDevice?.id == device.id;
 
     return InkWell(
-      onTap: () => _selectDevice(context, provider, device),
+      onTap: () async {
+        await _selectDevice(context, provider, device);
+        if (closeDrawer) {
+          Navigator.of(context).maybePop();
+        }
+      },
+      onSecondaryTapDown: (details) {
+        _showContextMenu(context, provider, device, details.globalPosition);
+      },
+      onLongPress: () {
+        final box = context.findRenderObject() as RenderBox?;
+        if (box == null) return;
+        final pos = box.localToGlobal(Offset.zero);
+        _showContextMenu(context, provider, device, pos);
+      },
       borderRadius: BorderRadius.circular(10),
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 4),
@@ -268,7 +313,59 @@ class _ServerWorkspaceScreenState extends State<ServerWorkspaceScreen> {
     );
   }
 
-  Widget _buildWorkspace(BuildContext context) {
+  Future<void> _showContextMenu(
+    BuildContext context,
+    DeviceProvider provider,
+    LinuxDevice device,
+    Offset position,
+  ) async {
+    final value = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        position.dx,
+        position.dy,
+        position.dx + 1,
+        position.dy + 1,
+      ),
+      items: [
+        PopupMenuItem(
+          value: device.isConnected ? 'disconnect' : 'connect',
+          child: Text(device.isConnected ? 'Отключить' : 'Подключить'),
+        ),
+        const PopupMenuItem(
+          value: 'edit',
+          child: Text('Редактировать'),
+        ),
+        const PopupMenuItem(
+          value: 'web',
+          child: Text('Открыть Web'),
+        ),
+        const PopupMenuItem(
+          value: 'delete',
+          child: Text('Удалить'),
+        ),
+      ],
+    );
+
+    if (value == null) return;
+    if (value == 'connect' || value == 'disconnect') {
+      _toggleConnection(context, provider, device);
+    } else if (value == 'edit') {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => DeviceFormScreen(device: device),
+        ),
+      );
+    } else if (value == 'web') {
+      setState(() => _tabIndex = 5);
+      _selectDevice(context, provider, device);
+    } else if (value == 'delete') {
+      provider.deleteDevice(device.id);
+    }
+  }
+
+  Widget _buildWorkspace(BuildContext context, {bool isDrawer = false}) {
     final theme = Theme.of(context);
     final provider = context.watch<DeviceProvider>();
     final selected = _selectedDevice;
@@ -286,6 +383,7 @@ class _ServerWorkspaceScreenState extends State<ServerWorkspaceScreen> {
           device: selected,
           isConnected: isConnected,
           status: _computeStatusFor(provider, selected),
+          lastConnectDuration: provider.lastConnectDuration,
           onEdit: () {
             Navigator.push(
               context,
@@ -390,6 +488,7 @@ class _ServerWorkspaceScreenState extends State<ServerWorkspaceScreen> {
     final theme = Theme.of(context);
     final isLoading = provider.isLoading;
     final error = provider.error;
+    final lastConnect = provider.lastConnectDuration;
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 520),
@@ -412,6 +511,13 @@ class _ServerWorkspaceScreenState extends State<ServerWorkspaceScreen> {
                   '${device.username}@${device.host}:${device.port}',
                   style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
                 ),
+                if (lastConnect != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'Время подключения: ${lastConnect.inMilliseconds} мс',
+                    style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+                  ),
+                ],
                 const SizedBox(height: 16),
                 if (error != null)
                   Container(
@@ -569,6 +675,7 @@ class _WorkspaceHeader extends StatelessWidget {
   final LinuxDevice device;
   final bool isConnected;
   final _DeviceStatus status;
+  final Duration? lastConnectDuration;
   final VoidCallback onEdit;
   final VoidCallback onToggleConnection;
   final VoidCallback? onRefresh;
@@ -577,6 +684,7 @@ class _WorkspaceHeader extends StatelessWidget {
     required this.device,
     required this.isConnected,
     required this.status,
+    required this.lastConnectDuration,
     required this.onEdit,
     required this.onToggleConnection,
     this.onRefresh,
@@ -585,66 +693,158 @@ class _WorkspaceHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Container(
-      height: 56,
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        border: Border(
-          bottom: BorderSide(color: theme.dividerColor),
-        ),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.storage_outlined, color: theme.colorScheme.primary),
-          const SizedBox(width: 10),
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                device.name,
-                style: theme.textTheme.titleSmall?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              Text(
-                '${device.username}@${device.host}',
-                style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
-              ),
-            ],
-          ),
-          const SizedBox(width: 16),
-          Row(
-            children: [
-              Icon(status.icon, size: 14, color: status.color),
-              const SizedBox(width: 6),
-              Text(
-                status.label,
-                style: theme.textTheme.bodySmall?.copyWith(color: status.color),
-              ),
-            ],
-          ),
-          const Spacer(),
-          if (onRefresh != null)
-            IconButton(
-              onPressed: onRefresh,
-              icon: const Icon(Icons.refresh),
-              tooltip: 'Обновить',
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isCompact = constraints.maxWidth < 760;
+        return Container(
+          height: isCompact ? 86 : 56,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surface,
+            border: Border(
+              bottom: BorderSide(color: theme.dividerColor),
             ),
-          OutlinedButton.icon(
-            onPressed: onEdit,
-            icon: const Icon(Icons.manage_accounts_outlined),
-            label: const Text('Сменить пользователя'),
           ),
-          const SizedBox(width: 8),
-          ElevatedButton.icon(
-            onPressed: onToggleConnection,
-            icon: Icon(isConnected ? Icons.link_off : Icons.link),
-            label: Text(isConnected ? 'Отключить' : 'Подключить'),
-          ),
-        ],
-      ),
+          child: isCompact
+              ? Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.storage_outlined, color: theme.colorScheme.primary),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                device.name,
+                                style: theme.textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              Text(
+                                '${device.username}@${device.host}',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.hintColor,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                        Row(
+                          children: [
+                            Icon(status.icon, size: 14, color: status.color),
+                            const SizedBox(width: 6),
+                            Text(
+                              status.label,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: status.color,
+                              ),
+                            ),
+                            if (lastConnectDuration != null) ...[
+                              const SizedBox(width: 10),
+                              Text(
+                                '${lastConnectDuration!.inMilliseconds} мс',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.hintColor,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        if (onRefresh != null)
+                          IconButton(
+                            onPressed: onRefresh,
+                            icon: const Icon(Icons.refresh),
+                            tooltip: 'Обновить',
+                          ),
+                        const Spacer(),
+                        OutlinedButton.icon(
+                          onPressed: onEdit,
+                          icon: const Icon(Icons.manage_accounts_outlined),
+                          label: const Text('Сменить'),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton.icon(
+                          onPressed: onToggleConnection,
+                          icon: Icon(isConnected ? Icons.link_off : Icons.link),
+                          label: Text(isConnected ? 'Отключить' : 'Подключить'),
+                        ),
+                      ],
+                    ),
+                  ],
+                )
+              : Row(
+                  children: [
+                    Icon(Icons.storage_outlined, color: theme.colorScheme.primary),
+                    const SizedBox(width: 10),
+                    Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          device.name,
+                          style: theme.textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Text(
+                          '${device.username}@${device.host}',
+                          style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(width: 16),
+                    Row(
+                      children: [
+                        Icon(status.icon, size: 14, color: status.color),
+                        const SizedBox(width: 6),
+                        Text(
+                          status.label,
+                          style: theme.textTheme.bodySmall?.copyWith(color: status.color),
+                        ),
+                        if (lastConnectDuration != null) ...[
+                          const SizedBox(width: 10),
+                          Text(
+                            '${lastConnectDuration!.inMilliseconds} мс',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.hintColor,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const Spacer(),
+                    if (onRefresh != null)
+                      IconButton(
+                        onPressed: onRefresh,
+                        icon: const Icon(Icons.refresh),
+                        tooltip: 'Обновить',
+                      ),
+                    OutlinedButton.icon(
+                      onPressed: onEdit,
+                      icon: const Icon(Icons.manage_accounts_outlined),
+                      label: const Text('Сменить пользователя'),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton.icon(
+                      onPressed: onToggleConnection,
+                      icon: Icon(isConnected ? Icons.link_off : Icons.link),
+                      label: Text(isConnected ? 'Отключить' : 'Подключить'),
+                    ),
+                  ],
+                ),
+        );
+      },
     );
   }
 }

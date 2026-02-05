@@ -3,8 +3,10 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:provider/provider.dart';
 import 'package:code_text_field/code_text_field.dart';
+import 'package:path/path.dart' as p;
 import 'package:highlight/highlight.dart';
 import 'package:highlight/languages/bash.dart';
 import 'package:highlight/languages/json.dart';
@@ -563,6 +565,15 @@ class _FileManagerScreenState extends State<FileManagerScreen> {
                   _showEditDialog(context, fileProvider, file);
                 },
               ),
+            if (!file.isDirectory)
+              ListTile(
+                leading: const Icon(Icons.open_in_new),
+                title: const Text('Открыть во внешнем'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _openInExternalEditor(context, file);
+                },
+              ),
             if (_isImageFile(file.name))
               ListTile(
                 leading: const Icon(Icons.image_outlined),
@@ -664,6 +675,8 @@ class _FileManagerScreenState extends State<FileManagerScreen> {
         if (!file.isDirectory)
           const PopupMenuItem(value: 'edit', child: Text('Редактировать')),
         if (!file.isDirectory)
+          const PopupMenuItem(value: 'open-external', child: Text('Открыть во внешнем')),
+        if (!file.isDirectory)
           const PopupMenuItem(value: 'download', child: Text('Скачать')),
         if (_isImageFile(file.name))
           const PopupMenuItem(value: 'preview', child: Text('Предпросмотр')),
@@ -687,6 +700,9 @@ class _FileManagerScreenState extends State<FileManagerScreen> {
         break;
       case 'edit':
         _showEditDialog(context, fileProvider, file);
+        break;
+      case 'open-external':
+        await _openInExternalEditor(context, file);
         break;
       case 'download':
         await _downloadFile(context, file);
@@ -813,6 +829,40 @@ class _FileManagerScreenState extends State<FileManagerScreen> {
     }
   }
 
+  Future<void> _openInExternalEditor(BuildContext context, FileItem file) async {
+    try {
+      final ssh = context.read<DeviceProvider>().sshService;
+      final tempDir = await Directory.systemTemp.createTemp('larinas_');
+      final localPath = p.join(tempDir.path, file.name);
+      await ssh.downloadFile(file.path, localPath);
+      await _openLocalFile(localPath);
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Не удалось открыть файл: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _openLocalFile(String path) async {
+    try {
+      final uri = Uri.file(path);
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (ok) return;
+    } catch (_) {}
+
+    try {
+      if (Platform.isMacOS) {
+        await Process.run('open', [path]);
+      } else if (Platform.isWindows) {
+        await Process.run('cmd', ['/c', 'start', path], runInShell: true);
+      } else if (Platform.isLinux) {
+        await Process.run('xdg-open', [path]);
+      }
+    } catch (_) {}
+  }
+
   Future<void> _downloadSelected(
     BuildContext context,
     List<FileItem> selected,
@@ -931,31 +981,98 @@ class _FileManagerScreenState extends State<FileManagerScreen> {
               text: content,
               language: _languageForFile(file.name),
             );
+            final isDirty = ValueNotifier<bool>(false);
+            codeController.addListener(() {
+              isDirty.value = codeController.text != content;
+            });
 
             return AlertDialog(
               title: Text('Редактирование: ${file.name}'),
               content: SizedBox(
-                width: 720,
-                child: Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Theme.of(context).dividerColor),
-                    color: Theme.of(context).colorScheme.surface,
-                  ),
-                  child: CodeField(
-                    controller: codeController,
-                    textStyle: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-                    expands: false,
-                    maxLines: 18,
-                    minLines: 8,
-                  ),
+                width: 900,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            file.path,
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(color: Theme.of(context).hintColor),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton.icon(
+                          onPressed: () => _openInExternalEditor(context, file),
+                          icon: const Icon(Icons.open_in_new),
+                          label: const Text('Открыть во внешнем'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      height: 420,
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Theme.of(context).dividerColor),
+                        color: Theme.of(context).colorScheme.surface,
+                      ),
+                      child: Scrollbar(
+                        child: CodeField(
+                          controller: codeController,
+                          textStyle: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                          expands: true,
+                          maxLines: null,
+                          minLines: null,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    ValueListenableBuilder<bool>(
+                      valueListenable: isDirty,
+                      builder: (context, dirty, child) {
+                        return Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            dirty ? 'Есть несохранённые изменения' : 'Изменений нет',
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  color: dirty ? Colors.orange : Theme.of(context).hintColor,
+                                ),
+                          ),
+                        );
+                      },
+                    ),
+                  ],
                 ),
               ),
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(context),
                   child: const Text('Отмена'),
+                ),
+                OutlinedButton(
+                  onPressed: () async {
+                    try {
+                      await fileProvider.writeFile(file.path, codeController.text);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Файл сохранен')),
+                        );
+                      }
+                    } catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Ошибка сохранения: $e')),
+                        );
+                      }
+                    }
+                  },
+                  child: const Text('Сохранить'),
                 ),
                 ElevatedButton(
                   onPressed: () async {
@@ -975,7 +1092,7 @@ class _FileManagerScreenState extends State<FileManagerScreen> {
                       }
                     }
                   },
-                  child: const Text('Сохранить'),
+                  child: const Text('Сохранить и закрыть'),
                 ),
               ],
             );

@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
 import 'package:file_picker/file_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../providers/device_provider.dart';
 import '../models/linux_device.dart';
@@ -38,6 +39,8 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
 
   final Set<String> _selectedIds = {};
   final Set<String> _selectedGroups = {};
+  List<_LogTemplate> _templates = [];
+  final Set<String> _selectedTemplateIds = {};
 
   @override
   void dispose() {
@@ -46,6 +49,12 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
     _dateFormatController.dispose();
     _dateExtractController.dispose();
     super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTemplates();
   }
 
   @override
@@ -59,33 +68,116 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
       appBar: AppBar(
         title: const Text('Сбор логов'),
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            _buildConfigPanel(context),
-            const SizedBox(height: 12),
-            Expanded(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surface,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Theme.of(context).dividerColor),
-                ),
-                child: ListView.builder(
-                  itemCount: groupNames.length,
-                  itemBuilder: (context, index) {
-                    final group = groupNames[index];
-                    final list = groups[group] ?? [];
-                    return _buildGroupSection(context, group, list);
-                  },
-                ),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final isWide = constraints.maxWidth >= 1100;
+          if (isWide) {
+            return Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Expanded(
+                    flex: 5,
+                    child: Column(
+                      children: [
+                        Expanded(
+                          child: ListView(
+                            children: [
+                              _buildConfigPanel(context),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        _buildActions(context, devices),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 6,
+                    child: _buildDevicePanel(context, groupNames, groups),
+                  ),
+                ],
               ),
+            );
+          }
+
+          return Padding(
+            padding: const EdgeInsets.all(16),
+            child: ListView(
+              children: [
+                _buildConfigPanel(context),
+                const SizedBox(height: 12),
+                _buildDevicePanel(context, groupNames, groups),
+                const SizedBox(height: 12),
+                _buildActions(context, devices),
+              ],
             ),
-            const SizedBox(height: 12),
-            _buildActions(context, devices),
-          ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildDevicePanel(
+    BuildContext context,
+    List<String> groupNames,
+    Map<String, List<LinuxDevice>> groups,
+  ) {
+    final theme = Theme.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: theme.dividerColor),
+      ),
+      child: Column(
+        children: [
+          _buildDevicePanelHeader(context),
+          Expanded(
+            child: ListView.builder(
+              itemCount: groupNames.length,
+              itemBuilder: (context, index) {
+                final group = groupNames[index];
+                final list = groups[group] ?? [];
+                return _buildGroupSection(context, group, list);
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDevicePanelHeader(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+        border: Border(
+          bottom: BorderSide(color: theme.dividerColor),
         ),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.dns, size: 16),
+          const SizedBox(width: 8),
+          const Text('Сервера'),
+          const Spacer(),
+          TextButton(
+            onPressed: _selectAllDevices,
+            child: const Text('Выбрать все'),
+          ),
+          TextButton(
+            onPressed: () => setState(() {
+              _selectedIds.clear();
+              _selectedGroups.clear();
+            }),
+            child: const Text('Снять выбор'),
+          ),
+        ],
       ),
     );
   }
@@ -107,6 +199,8 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
                   fontWeight: FontWeight.w600,
                 ),
           ),
+          const SizedBox(height: 12),
+          _buildTemplatePanel(context),
           const SizedBox(height: 12),
           TextField(
             controller: _pathController,
@@ -151,26 +245,39 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           Row(
+            children: const [
+              Icon(Icons.info_outline, size: 16, color: Colors.grey),
+              SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Regex должен захватывать дату в первой группе. Пример: ^(.{19}) для строки "2026-02-05 12:34:56".',
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 16,
+            runSpacing: 8,
             children: [
-              Checkbox(
+              _OptionCheck(
                 value: _sortByNameDate,
+                label: 'Сортировать по названию (дата)',
                 onChanged: (value) => setState(() => _sortByNameDate = value ?? true),
               ),
-              const Text('Сортировать по названию (дата)'),
-              const SizedBox(width: 16),
-              Checkbox(
+              _OptionCheck(
                 value: _sortByTime,
+                label: 'Обрезать по времени',
                 onChanged: (value) => setState(() => _sortByTime = value ?? true),
               ),
-              const Text('Обрезать по времени'),
-              const SizedBox(width: 16),
-              Checkbox(
+              _OptionCheck(
                 value: _includeNoDateLines,
+                label: 'Оставлять строки без даты',
                 onChanged: (value) => setState(() => _includeNoDateLines = value ?? true),
               ),
-              const Text('Оставлять строки без даты'),
             ],
           ),
           const SizedBox(height: 8),
@@ -192,6 +299,142 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
               ),
             ],
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTemplatePanel(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: theme.dividerColor),
+      ),
+      child: Column(
+        children: [
+          Container(
+            height: 40,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+              border: Border(
+                bottom: BorderSide(color: theme.dividerColor),
+              ),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.bookmarks_outlined, size: 16),
+                const SizedBox(width: 8),
+                const Text('Шаблоны логов'),
+                const Spacer(),
+                OutlinedButton(
+                  onPressed: _saveTemplate,
+                  child: const Text('Сохранить'),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  onPressed: _selectedTemplateIds.isEmpty ? null : _deleteTemplate,
+                  icon: const Icon(Icons.delete_outline),
+                  tooltip: 'Удалить шаблон',
+                ),
+              ],
+            ),
+          ),
+          if (_templates.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline, size: 18, color: theme.hintColor),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Шаблонов нет. Сохраните текущие настройки.',
+                    style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+                  ),
+                ],
+              ),
+            )
+          else
+            SizedBox(
+              height: MediaQuery.of(context).size.height < 800 ? 120 : 180,
+              child: ListView.builder(
+                itemCount: _templates.length,
+                itemBuilder: (context, index) {
+                  final template = _templates[index];
+                  final isSelected = _selectedTemplateIds.contains(template.id);
+                  return InkWell(
+                    onTap: () {
+                      setState(() {
+                        if (isSelected) {
+                          _selectedTemplateIds.remove(template.id);
+                        } else {
+                          _selectedTemplateIds.add(template.id);
+                        }
+                      });
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: isSelected
+                            ? theme.colorScheme.primary.withValues(alpha: 0.08)
+                            : theme.colorScheme.surface,
+                        border: Border(
+                          bottom: BorderSide(color: theme.dividerColor),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.description_outlined,
+                            size: 18,
+                            color: isSelected
+                                ? theme.colorScheme.primary
+                                : theme.hintColor,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  template.name,
+                                  style: theme.textTheme.bodyMedium?.copyWith(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  template.path,
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: theme.hintColor,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+                          Checkbox(
+                            value: isSelected,
+                            onChanged: (_) {
+                              setState(() {
+                                if (isSelected) {
+                                  _selectedTemplateIds.remove(template.id);
+                                } else {
+                                  _selectedTemplateIds.add(template.id);
+                                }
+                              });
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
         ],
       ),
     );
@@ -318,13 +561,33 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
     setState(() => _isLoading = true);
 
     try {
-      final pathPattern = _pathController.text.trim();
-      if (pathPattern.isEmpty) {
-        throw Exception('Укажите путь к логам');
+      final templatesToUse = _selectedTemplateIds.isNotEmpty
+          ? _templates.where((t) => _selectedTemplateIds.contains(t.id)).toList()
+          : <_LogTemplate>[];
+      final hasTemplates = templatesToUse.isNotEmpty;
+
+      final basePath = _pathController.text.trim();
+      if (!hasTemplates && basePath.isEmpty) {
+        throw Exception('Укажите путь к логам или выберите шаблон');
       }
 
       for (final device in devices) {
-        await _collectForDevice(device, pathPattern, targetDir);
+        if (hasTemplates) {
+          for (final template in templatesToUse) {
+            await _collectForDevice(
+              device,
+              template.path,
+              targetDir,
+              template: template,
+            );
+          }
+        } else {
+          await _collectForDevice(
+            device,
+            basePath,
+            targetDir,
+          );
+        }
       }
 
       if (mounted) {
@@ -349,6 +612,7 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
     LinuxDevice device,
     String pathPattern,
     String targetDir,
+    {_LogTemplate? template}
   ) async {
     final ssh = SshService();
     final connected = await ssh.connect(device);
@@ -357,13 +621,20 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
     }
 
     try {
+      if (template != null) {
+        _applyTemplateToState(template);
+      }
       final paths = await _resolvePaths(ssh, pathPattern);
+      final logLabel = _resolveLogLabel(pathPattern, templateName: template?.name);
+      final hostDir = p.join(targetDir, device.host);
+      final logDir = p.join(hostDir, logLabel);
+      await Directory(logDir).create(recursive: true);
       for (final remote in paths) {
         await _processRemotePath(
           ssh,
           device,
           remote,
-          targetDir,
+          logDir,
         );
       }
     } finally {
@@ -427,9 +698,9 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
     await ssh.downloadFile(remoteFile, localPath);
 
     final filtered = await _filterLogFile(localPath);
-      final outputName = '${device.name}_${p.basename(remoteFile)}';
-      final outputPath = p.join(targetDir, outputName);
-      await File(outputPath).writeAsString(filtered);
+    final outputName = p.basename(remoteFile);
+    final outputPath = p.join(targetDir, outputName);
+    await File(outputPath).writeAsString(filtered);
   }
 
   Future<void> _processArchive(
@@ -461,7 +732,7 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
       }
       final content = file.content as List<int>;
       final filtered = _filterLogContent(String.fromCharCodes(content));
-      final outputName = '${device.name}_${p.basename(file.name)}';
+      final outputName = p.basename(file.name);
       final outputPath = p.join(targetDir, outputName);
       await File(outputPath).writeAsString(filtered);
     }
@@ -514,6 +785,17 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
     return buffer.toString();
   }
 
+  void _applyTemplateToState(_LogTemplate template) {
+    _archiveInnerPathController.text = template.archiveInnerPath;
+    _dateFormatController.text = template.dateFormat;
+    _dateExtractController.text = template.dateRegex;
+    _sortByNameDate = template.sortByNameDate;
+    _sortByTime = template.sortByTime;
+    _includeNoDateLines = template.includeNoDateLines;
+    _timeFrom = template.timeFrom;
+    _timeTo = template.timeTo;
+  }
+
   Future<void> _pickTime(BuildContext context, bool isFrom) async {
     final initial = isFrom ? _timeFrom ?? const TimeOfDay(hour: 0, minute: 0) : _timeTo ?? const TimeOfDay(hour: 23, minute: 59);
     final picked = await showTimePicker(
@@ -538,6 +820,105 @@ class _LogCollectorScreenState extends State<LogCollectorScreen> {
     }
     return map;
   }
+
+  void _selectAllDevices() {
+    final provider = context.read<DeviceProvider>();
+    setState(() {
+      _selectedIds.addAll(provider.devices.map((d) => d.id));
+      _selectedGroups
+        ..clear()
+        ..addAll(_groupDevices(provider.devices).keys);
+    });
+  }
+
+  String _resolveLogLabel(String pattern, {String? templateName}) {
+    if (templateName != null && templateName.trim().isNotEmpty) {
+      return templateName.trim();
+    }
+    var value = pattern.trim();
+    if (value.endsWith('/')) {
+      value = value.substring(0, value.length - 1);
+    }
+    if (value.contains('/')) {
+      value = value.split('/').last;
+    }
+    value = value.replaceAll('*', '').replaceAll('?', '').trim();
+    if (value.isEmpty) return 'logs';
+    return value;
+  }
+
+  Future<void> _loadTemplates() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getStringList(_templateKey) ?? [];
+    setState(() {
+      _templates = raw.map(_LogTemplate.fromStorage).toList();
+      if (_templates.isNotEmpty && _selectedTemplateIds.isEmpty) {
+        _selectedTemplateIds.add(_templates.first.id);
+      }
+    });
+  }
+
+  Future<void> _saveTemplates() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+      _templateKey,
+      _templates.map((t) => t.toStorage()).toList(),
+    );
+  }
+
+  Future<void> _saveTemplate() async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Сохранить шаблон'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(labelText: 'Название'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Отмена'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Сохранить'),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty) return;
+
+    final template = _LogTemplate(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      name: name,
+      path: _pathController.text.trim(),
+      archiveInnerPath: _archiveInnerPathController.text.trim(),
+      dateFormat: _dateFormatController.text.trim(),
+      dateRegex: _dateExtractController.text.trim(),
+      sortByNameDate: _sortByNameDate,
+      sortByTime: _sortByTime,
+      includeNoDateLines: _includeNoDateLines,
+      timeFrom: _timeFrom,
+      timeTo: _timeTo,
+    );
+
+    setState(() {
+      _templates.add(template);
+      _selectedTemplateIds.add(template.id);
+    });
+    await _saveTemplates();
+  }
+
+  Future<void> _deleteTemplate() async {
+    if (_selectedTemplateIds.isEmpty) return;
+    setState(() {
+      _templates.removeWhere((t) => _selectedTemplateIds.contains(t.id));
+      _selectedTemplateIds.clear();
+    });
+    await _saveTemplates();
+  }
 }
 
 class _TimePickerChip extends StatelessWidget {
@@ -552,6 +933,106 @@ class _TimePickerChip extends StatelessWidget {
       onPressed: onTap,
       icon: const Icon(Icons.access_time, size: 16),
       label: Text(label),
+    );
+  }
+}
+
+class _OptionCheck extends StatelessWidget {
+  final bool value;
+  final String label;
+  final ValueChanged<bool?> onChanged;
+
+  const _OptionCheck({
+    required this.value,
+    required this.label,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: () => onChanged(!value),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Checkbox(value: value, onChanged: onChanged),
+          Flexible(child: Text(label)),
+        ],
+      ),
+    );
+  }
+}
+
+const _templateKey = 'log_templates';
+
+class _LogTemplate {
+  final String id;
+  final String name;
+  final String path;
+  final String archiveInnerPath;
+  final String dateFormat;
+  final String dateRegex;
+  final bool sortByNameDate;
+  final bool sortByTime;
+  final bool includeNoDateLines;
+  final TimeOfDay? timeFrom;
+  final TimeOfDay? timeTo;
+
+  const _LogTemplate({
+    required this.id,
+    required this.name,
+    required this.path,
+    required this.archiveInnerPath,
+    required this.dateFormat,
+    required this.dateRegex,
+    required this.sortByNameDate,
+    required this.sortByTime,
+    required this.includeNoDateLines,
+    required this.timeFrom,
+    required this.timeTo,
+  });
+
+  String toStorage() {
+    final from = timeFrom == null ? '' : '${timeFrom!.hour}:${timeFrom!.minute}';
+    final to = timeTo == null ? '' : '${timeTo!.hour}:${timeTo!.minute}';
+    return [
+      id,
+      name,
+      path,
+      archiveInnerPath,
+      dateFormat,
+      dateRegex,
+      sortByNameDate ? '1' : '0',
+      sortByTime ? '1' : '0',
+      includeNoDateLines ? '1' : '0',
+      from,
+      to,
+    ].join('|');
+  }
+
+  factory _LogTemplate.fromStorage(String raw) {
+    final parts = raw.split('|');
+    TimeOfDay? parseTime(String value) {
+      if (value.isEmpty || !value.contains(':')) return null;
+      final seg = value.split(':');
+      return TimeOfDay(
+        hour: int.tryParse(seg[0]) ?? 0,
+        minute: int.tryParse(seg[1]) ?? 0,
+      );
+    }
+
+    return _LogTemplate(
+      id: parts.isNotEmpty ? parts[0] : DateTime.now().millisecondsSinceEpoch.toString(),
+      name: parts.length > 1 ? parts[1] : 'Шаблон',
+      path: parts.length > 2 ? parts[2] : '',
+      archiveInnerPath: parts.length > 3 ? parts[3] : '',
+      dateFormat: parts.length > 4 ? parts[4] : 'yyyy-MM-dd HH:mm:ss',
+      dateRegex: parts.length > 5 ? parts[5] : r'^(.{19})',
+      sortByNameDate: parts.length > 6 ? parts[6] == '1' : true,
+      sortByTime: parts.length > 7 ? parts[7] == '1' : true,
+      includeNoDateLines: parts.length > 8 ? parts[8] == '1' : true,
+      timeFrom: parts.length > 9 ? parseTime(parts[9]) : null,
+      timeTo: parts.length > 10 ? parseTime(parts[10]) : null,
     );
   }
 }
